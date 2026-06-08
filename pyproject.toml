@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "mad-skills"
-version = "0.1.0"
+version = "0.1.1"
 description = "Installable Claude Code skills, including fs-chat: filesystem-based chat between Claude Code sessions."
 readme = "README.md"
 requires-python = ">=3.9"

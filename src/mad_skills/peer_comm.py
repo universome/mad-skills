@@ -5,6 +5,13 @@ shared "bus" directory. No daemon, no network: point ``MAD_SKILLS_PEER_DIR``
 at any shared path (a synced folder, an NFS/SMB mount, or just a local dir for
 same-machine sessions) and the peers find each other.
 
+Each "group" (chat room) is its own subdirectory; peers only see others in the
+same group. The bus path resolves as:
+
+    MAD_SKILLS_FS_CHAT_DIR              if set, used verbatim (explicit path)
+    else ~/.mad-skills/fs-chat/<group> where <group> = MAD_SKILLS_FS_CHAT_GROUP
+                                       or --group, defaulting to "all"
+
 Bus layout (shared, may live on a mounted/synced filesystem)::
 
     <bus>/peers/<peer_id>.json        one heartbeat file per live peer
@@ -27,24 +34,46 @@ import time
 import uuid
 from pathlib import Path
 
-DEFAULT_HOME = Path.home() / ".mad-skills" / "peer-comm"
+FS_CHAT_HOME = Path.home() / ".mad-skills" / "fs-chat"
+DEFAULT_GROUP = "all"
 # A peer is considered "live" if its heartbeat was touched within this window.
 DEFAULT_STALE_SECONDS = 120
+
+# Set from the global --dir / --group flags in main(); env vars are the fallback.
+_DIR_OVERRIDE: str | None = None
+_GROUP_OVERRIDE: str | None = None
 
 
 # --------------------------------------------------------------------------- #
 # Paths
 # --------------------------------------------------------------------------- #
 def bus_dir() -> Path:
-    """Shared message bus. Override with MAD_SKILLS_PEER_DIR."""
-    env = os.environ.get("MAD_SKILLS_PEER_DIR")
-    base = Path(env).expanduser() if env else DEFAULT_HOME / "bus"
-    return base
+    """Shared message bus for the active group.
+
+    Resolution order (first hit wins):
+      1. --dir / MAD_SKILLS_FS_CHAT_DIR    -> used verbatim (explicit path)
+      2. --group / MAD_SKILLS_FS_CHAT_GROUP -> ~/.mad-skills/fs-chat/<group>
+      3. the dir saved by the last `register` in this working directory
+      4. ~/.mad-skills/fs-chat/all          (default)
+
+    Steps 3-4 mean you set the dir once via `register` and every later command
+    from the same working directory reuses it — no need to repeat the flag.
+    """
+    explicit = _DIR_OVERRIDE or os.environ.get("MAD_SKILLS_FS_CHAT_DIR")
+    if explicit:
+        return Path(explicit).expanduser()
+    group = _GROUP_OVERRIDE or os.environ.get("MAD_SKILLS_FS_CHAT_GROUP")
+    if group:
+        return FS_CHAT_HOME / group
+    saved = _load_context().get("bus_dir")
+    if saved:
+        return Path(saved)
+    return FS_CHAT_HOME / DEFAULT_GROUP
 
 
 def state_dir() -> Path:
-    """Machine-local identity store (never shared across machines)."""
-    return DEFAULT_HOME / "state"
+    """Machine-local identity store (never shared on the bus)."""
+    return FS_CHAT_HOME / ".state"
 
 
 def _cwd_key() -> str:
@@ -91,6 +120,19 @@ def _identity_path() -> Path:
     return state_dir() / f"{_cwd_key()}.json"
 
 
+def _context_path() -> Path:
+    """Per-working-directory session context (which bus dir to use)."""
+    return state_dir() / "context" / f"{_cwd_key()}.json"
+
+
+def _load_context() -> dict:
+    return _read_json(_context_path()) or {}
+
+
+def _save_context(bus: Path) -> None:
+    _atomic_write_json(_context_path(), {"bus_dir": str(bus)})
+
+
 def load_or_create_identity(name: str | None = None) -> dict:
     path = _identity_path()
     ident = _read_json(path)
@@ -124,14 +166,16 @@ def cmd_register(args) -> int:
     if args.summary is not None:
         ident["summary"] = args.summary
         _atomic_write_json(_identity_path(), ident)
+    bus = bus_dir()
+    _save_context(bus)  # remember dir+name so later commands need no flags
     _publish_heartbeat(ident)
     inbox_dir(ident["id"]).mkdir(parents=True, exist_ok=True)
-    _emit(args, {"registered": ident})
+    _emit(args, {"registered": ident, "bus_dir": str(bus)})
     return 0
 
 
 def cmd_whoami(args) -> int:
-    _emit(args, {"identity": load_or_create_identity()})
+    _emit(args, {"identity": load_or_create_identity(), "bus_dir": str(bus_dir())})
     return 0
 
 
@@ -287,10 +331,21 @@ def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="fs-chat",
         description="Communicate between Claude Code sessions over a shared "
-        "filesystem. Set MAD_SKILLS_PEER_DIR to the shared bus path.",
+        "filesystem. Peers in the same group see each other; default group is "
+        "'all' under ~/.mad-skills/fs-chat. Use --group NAME (or "
+        "MAD_SKILLS_FS_CHAT_GROUP) for a separate room, or --dir / "
+        "MAD_SKILLS_FS_CHAT_DIR for an explicit bus path.",
     )
     p.add_argument(
         "--json", action="store_true", help="emit machine-readable JSON"
+    )
+    p.add_argument(
+        "--group", metavar="NAME",
+        help="group/room name under ~/.mad-skills/fs-chat (default: all)",
+    )
+    p.add_argument(
+        "--dir", metavar="PATH",
+        help="explicit bus directory (overrides --group and env vars)",
     )
     sub = p.add_subparsers(dest="command", required=True)
 
@@ -340,7 +395,10 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
+    global _DIR_OVERRIDE, _GROUP_OVERRIDE
     args = build_parser().parse_args(argv)
+    _DIR_OVERRIDE = args.dir
+    _GROUP_OVERRIDE = args.group
     return args.func(args)
 
 

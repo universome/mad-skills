@@ -4,8 +4,9 @@ description: >-
   Chat between Claude Code sessions over a shared filesystem — no server, no
   network, just files. Use when the user wants this session to talk to, message,
   coordinate with, or hand off work to another Claude/Claude Code instance
-  (same machine or via a shared/synced folder), or asks to "see who else is
-  running", "send a message to the other session", or "set up peer chat".
+  (same machine or via a shared/synced folder), or asks to "register on
+  fs-chat", "see who else is running", "send a message to the other session",
+  "watch for messages", or "join a group chat".
 ---
 
 # fs-chat — filesystem peer chat
@@ -14,41 +15,63 @@ Two or more Claude Code sessions discover each other and exchange messages by
 reading and writing files under a shared **bus** directory. There is no daemon
 and no network — the transport is just files. This works for:
 
-- **Same machine**: multiple sessions in different projects (default bus dir).
-- **Different machines**: point every session's `MAD_SKILLS_PEER_DIR` at the
-  same synced/mounted folder (Dropbox, iCloud, NFS, SMB, etc.).
+- **Same machine / same cluster** (shared `$HOME`): just use the default group.
+- **Across machines**: point every session at the same synced/mounted folder.
 
 All operations go through the bundled `fs-chat` CLI (installed with this
 package). It handles atomic writes, per-directory identity, and liveness, so
 prefer it over hand-rolling file reads/writes.
 
-## Configuration
+## Groups and the bus path (READ THIS FIRST)
 
-- `MAD_SKILLS_PEER_DIR` — the shared bus path. If unset, defaults to
-  `~/.mad-skills/peer-comm/bus` (fine for same-machine sessions). To chat
-  across machines, set this to a shared folder **in every session**.
+A **group** (chat room) is one directory. Peers only see others in the **same
+group**. The bus path resolves as (first hit wins):
 
-Each working directory gets a stable peer identity automatically; its default
-display name is the directory's basename.
+1. `--dir PATH` (or `MAD_SKILLS_FS_CHAT_DIR`) → used **verbatim**.
+2. else `--group NAME` (or `MAD_SKILLS_FS_CHAT_GROUP`) → `~/.mad-skills/fs-chat/<NAME>`.
+3. else **the dir+name saved by the last `register` in this working directory**.
+4. else the default group `all`.
+
+**Register once, then drop the flags.** Because of step 3, you only pass the
+dir/group and `--name` on the **`register`** call. `register` saves them for the
+current working directory, so every later command (`peers`, `send`, `inbox`,
+`watch`) needs **no flags** — they automatically reuse the same bus and
+identity. (This relies on running all commands from the same working directory,
+which a Claude Code session does.)
+
+Map the user's words to the register flag:
+- "in group X" / "join the X chat" → `--group X`
+- an explicit path like `/home/me/.mad-skills/fs-chat/kube-chat` → `--dir <that path>`
+- nothing specified → omit (default group `all`)
+
+Example — the user says *"register on fs-chat as alice on
+/home/iskorokhodov/.mad-skills/fs-chat/kube-chat, then watch for messages"*:
+
+```bash
+fs-chat --dir /home/iskorokhodov/.mad-skills/fs-chat/kube-chat register --name alice
+fs-chat watch          # no flags needed — reuses the dir from register
+```
+
+(That path is exactly `~/.mad-skills/fs-chat/kube-chat`, so `--group kube-chat`
+at register time is equivalent and shorter.)
 
 ## Workflow
 
-1. **Register** this session so others can see it (run once per session, and
-   re-run periodically to refresh liveness — heartbeats go stale after 120s):
+1. **Register** this session once, with the dir/group + name. This saves them
+   for the working directory (re-run periodically to refresh liveness;
+   heartbeats go stale after 120s):
 
    ```bash
-   fs-chat register --name "backend" --summary "refactoring the auth module"
+   fs-chat --group <g> register --name "alice" --summary "what I'm doing"
    ```
 
-2. **Discover peers** — get their ids before messaging:
+2. **Discover peers** — get their ids before messaging (no flags from here on):
 
    ```bash
-   fs-chat --json peers              # all live peers, machine-readable
-   fs-chat peers --scope machine     # only this machine
+   fs-chat --json peers
    ```
 
-3. **Send** a message to a peer by id (body can be `-` to read from stdin for
-   long/multiline content):
+3. **Send** to a peer by id (`-` as the body reads stdin for long/multiline):
 
    ```bash
    fs-chat send <peer_id> "can you take the frontend tests?"
@@ -57,13 +80,13 @@ display name is the directory's basename.
 4. **Receive** — read and consume your inbox:
 
    ```bash
-   fs-chat --json inbox        # returns messages, then deletes them
-   fs-chat inbox --peek        # read without consuming
+   fs-chat --json inbox     # returns messages, then deletes them
+   fs-chat inbox --peek     # read without consuming
    ```
 
-5. **Stay current** — for a live conversation, run a background watcher so new
-   messages stream in without manual polling. Launch it with the Bash tool in
-   the background, then read its output as messages arrive:
+5. **Stay current** — for a live conversation, run a background watcher (launch
+   it with the Bash tool in the background) so new messages stream in without
+   manual polling:
 
    ```bash
    fs-chat watch --interval 1
@@ -71,31 +94,34 @@ display name is the directory's basename.
 
 ## Guidance for Claude
 
+- Pass `--group`/`--dir` and `--name` **only on `register`**; later commands
+  reuse them automatically. Only re-pass a flag to switch group mid-session.
+- Put `--group`/`--dir`/`--json` before the subcommand: `fs-chat --json peers`.
 - Use `--json` whenever you need to parse output (peers, inbox); use the plain
   form only when showing the user.
-- You must call `register` before peers can find you, and re-register (or run
-  any command — every command refreshes your heartbeat) to stay listed.
-- `inbox` **consumes** messages (deletes them after reading). Use `--peek` if
-  you only want to look. Don't call `inbox` repeatedly expecting the same
-  messages back.
+- You must `register` before peers can find you; re-register (or run any
+  command) to stay listed.
+- `inbox` **consumes** messages (deletes after reading). Use `--peek` to look
+  without consuming. Don't call `inbox` repeatedly expecting the same messages.
 - To message a peer you need its `peer_id` from `peers`, not its display name.
-- When the user asks to "talk to the other session", the loop is:
-  `register` → `peers` (find the target id) → `send` → `inbox`/`watch` for
-  replies.
-- For an extended back-and-forth, prefer a background `watch` over polling
-  `inbox` in a loop.
+- The loop for "talk to the other session": `register` → `peers` (find target
+  id) → `send` → `watch` (or `inbox`) for replies. Prefer a background `watch`
+  over polling `inbox` for an extended back-and-forth.
 
 ## Full command reference
 
 ```
-fs-chat register [--name NAME] [--summary TEXT]   announce this session
-fs-chat whoami                                    show your peer identity
-fs-chat set-summary TEXT                          update your status
-fs-chat peers [--all] [--scope all|machine|dir] [--stale-seconds N]
-fs-chat send PEER_ID MESSAGE                      MESSAGE='-' reads stdin
-fs-chat inbox [--peek]                            read (and consume) messages
-fs-chat watch [--interval SECONDS]                stream messages until Ctrl-C
-fs-chat unregister                                remove your heartbeat
+fs-chat [--group NAME | --dir PATH] [--json] <subcommand>
+
+  register [--name NAME] [--summary TEXT]   announce this session
+  whoami                                    show your peer identity
+  set-summary TEXT                          update your status
+  peers [--all] [--scope all|machine|dir] [--stale-seconds N]
+  send PEER_ID MESSAGE                      MESSAGE='-' reads stdin
+  inbox [--peek]                            read (and consume) messages
+  watch [--interval SECONDS]                stream messages until Ctrl-C
+  unregister                                remove your heartbeat
 ```
 
-Add `--json` before any subcommand for machine-readable output.
+Env vars: `MAD_SKILLS_FS_CHAT_DIR` (explicit bus path),
+`MAD_SKILLS_FS_CHAT_GROUP` (group name).
