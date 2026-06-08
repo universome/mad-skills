@@ -1,0 +1,35 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "mad-skills"
+version = "0.1.0"
+description = "Installable Claude Code skills, including fs-chat: filesystem-based chat between Claude Code sessions."
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+authors = [{ name = "Ivan Skorokhodov" }]
+keywords = ["claude", "claude-code", "skills", "agent", "mcp", "ai"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Environment :: Console",
+]
+dependencies = []
+
+[project.urls]
+Homepage = "https://github.com/universome/mad-skills"
+
+[project.scripts]
+mad-skills = "mad_skills.cli:main"
+fs-chat = "mad_skills.peer_comm:main"
+
+[tool.hatch.build.targets.wheel]
+# Skill files (SKILL.md, scripts) live inside the package dir, so hatchling
+# bundles them into the wheel as package data automatically.
+packages = ["src/mad_skills"]
+
+[tool.hatch.build.targets.sdist]
+include = ["src/mad_skills", "README.md", "LICENSE", "pyproject.toml"]
