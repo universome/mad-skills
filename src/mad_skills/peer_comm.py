@@ -65,20 +65,28 @@ def bus_dir() -> Path:
     group = _GROUP_OVERRIDE or os.environ.get("MAD_SKILLS_FS_CHAT_GROUP")
     if group:
         return FS_CHAT_HOME / group
-    saved = _load_context().get("bus_dir")
+    saved = _load_state().get("bus_dir")
     if saved:
         return Path(saved)
     return FS_CHAT_HOME / DEFAULT_GROUP
 
 
 def state_dir() -> Path:
-    """Machine-local identity store (never shared on the bus)."""
+    """Per-session state store for identity + active bus.
+
+    Lives under $HOME, which on a shared-home cluster is itself shared — so the
+    state *filename* is keyed by host+cwd (see _cwd_key) to keep each pod's
+    record separate, and the peer id is seeded by host too (see _seed_id).
+    """
     return FS_CHAT_HOME / ".state"
 
 
 def _cwd_key() -> str:
+    # Host-aware: on a shared $HOME, two pods in the same cwd must NOT share
+    # one state file (that was the id-collision bug).
+    host = socket.gethostname()
     cwd = os.path.realpath(os.getcwd())
-    return hashlib.sha1(cwd.encode()).hexdigest()[:16]
+    return hashlib.sha1(f"{host}\0{cwd}".encode()).hexdigest()[:16]
 
 
 def peers_dir() -> Path:
@@ -116,38 +124,48 @@ def _read_json(path: Path) -> dict | None:
 # --------------------------------------------------------------------------- #
 # Identity
 # --------------------------------------------------------------------------- #
-def _identity_path() -> Path:
+def _state_path() -> Path:
     return state_dir() / f"{_cwd_key()}.json"
 
 
-def _context_path() -> Path:
-    """Per-working-directory session context (which bus dir to use)."""
-    return state_dir() / "context" / f"{_cwd_key()}.json"
+def _load_state() -> dict:
+    return _read_json(_state_path()) or {}
 
 
-def _load_context() -> dict:
-    return _read_json(_context_path()) or {}
+def _seed_id(name: str, host: str, bus: Path) -> str:
+    """Deterministic peer id seeded by name + host + bus (group/dir).
+
+    Same (name, host, bus) -> same id, so bare follow-up commands recompute the
+    identical id that `register` produced. Different on any axis -> different
+    id, which is what prevents the shared-home collision: two pods (different
+    host), two rooms (different bus), or two names never share an id.
+    """
+    seed = "\0".join([name, host, str(bus)])
+    return hashlib.sha1(seed.encode()).hexdigest()[:12]
 
 
-def _save_context(bus: Path) -> None:
-    _atomic_write_json(_context_path(), {"bus_dir": str(bus)})
+def load_or_create_identity(name: str | None = None, persist: bool = False) -> dict:
+    """Resolve this session's identity for the active bus.
 
-
-def load_or_create_identity(name: str | None = None) -> dict:
-    path = _identity_path()
-    ident = _read_json(path)
-    if ident is None:
-        ident = {
-            "id": uuid.uuid4().hex[:12],
-            "name": name or Path(os.getcwd()).name,
-            "cwd": os.path.realpath(os.getcwd()),
-            "host": socket.gethostname(),
-            "summary": "",
-        }
-        _atomic_write_json(path, ident)
-    elif name and name != ident.get("name"):
-        ident["name"] = name
-        _atomic_write_json(path, ident)
+    The id is derived (not random), so a bare command recomputes the same id
+    that `register` saved. `name` overrides the stored name (used by register);
+    otherwise the stored name — or the directory basename — is used.
+    """
+    state = _load_state()
+    host = socket.gethostname()
+    cwd = os.path.realpath(os.getcwd())
+    bus = bus_dir()
+    nm = name or state.get("name") or Path(cwd).name
+    ident = {
+        "id": _seed_id(nm, host, bus),
+        "name": nm,
+        "cwd": cwd,
+        "host": host,
+        "summary": state.get("summary", ""),
+        "bus_dir": str(bus),
+    }
+    if persist:
+        _atomic_write_json(_state_path(), ident)
     return ident
 
 
@@ -162,27 +180,27 @@ def _publish_heartbeat(ident: dict) -> None:
 # Commands
 # --------------------------------------------------------------------------- #
 def cmd_register(args) -> int:
-    ident = load_or_create_identity(args.name)
+    # persist=True saves name+bus so later commands need no flags
+    ident = load_or_create_identity(args.name, persist=True)
     if args.summary is not None:
         ident["summary"] = args.summary
-        _atomic_write_json(_identity_path(), ident)
-    bus = bus_dir()
-    _save_context(bus)  # remember dir+name so later commands need no flags
+        _atomic_write_json(_state_path(), ident)
     _publish_heartbeat(ident)
     inbox_dir(ident["id"]).mkdir(parents=True, exist_ok=True)
-    _emit(args, {"registered": ident, "bus_dir": str(bus)})
+    _emit(args, {"registered": ident, "bus_dir": ident["bus_dir"]})
     return 0
 
 
 def cmd_whoami(args) -> int:
-    _emit(args, {"identity": load_or_create_identity(), "bus_dir": str(bus_dir())})
+    ident = load_or_create_identity()
+    _emit(args, {"identity": ident, "bus_dir": ident["bus_dir"]})
     return 0
 
 
 def cmd_set_summary(args) -> int:
     ident = load_or_create_identity()
     ident["summary"] = args.text
-    _atomic_write_json(_identity_path(), ident)
+    _atomic_write_json(_state_path(), ident)
     _publish_heartbeat(ident)
     _emit(args, {"ok": True, "summary": args.text})
     return 0
