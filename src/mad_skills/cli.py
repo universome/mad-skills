@@ -47,6 +47,16 @@ def cmd_list(args) -> int:
     return 0
 
 
+def _remove_dest(dest: Path) -> None:
+    """Remove an existing skill entry, whether a real dir or a symlink."""
+    if dest.is_symlink():
+        dest.unlink()
+    elif dest.is_dir():
+        shutil.rmtree(dest)
+    elif dest.exists():
+        dest.unlink()
+
+
 def cmd_install(args) -> int:
     target = _target_dir(args)
     target.mkdir(parents=True, exist_ok=True)
@@ -60,19 +70,36 @@ def cmd_install(args) -> int:
             print(f"! unknown skill: {name} (have: {', '.join(sorted(available))})")
             return 1
         dest = target / name
-        if dest.exists():
+        if dest.exists() or dest.is_symlink():
             if not args.force:
                 print(f"  skip {name} (exists; use --force to overwrite)")
                 continue
-            shutil.rmtree(dest)
-        # resources.as_file gives a real filesystem path even from a zip/wheel
+            _remove_dest(dest)
+
+        if args.link:
+            # Symlink to the installed package's copy, so `pip install -U`
+            # updates the skill in place (no re-run needed; still restart
+            # Claude Code). Requires a real on-disk path — fall back to copy
+            # if the package is zipped or the path can't be resolved.
+            src_path = Path(str(root / name))
+            if src_path.is_dir():
+                dest.symlink_to(src_path, target_is_directory=True)
+                installed.append(name)
+                print(f"  linked {name} -> {dest} -> {src_path}")
+                continue
+            print(f"  ! cannot symlink {name} (no on-disk path); copying instead")
+
         with resources.as_file(root / name) as src:
             shutil.copytree(src, dest)
         installed.append(name)
         print(f"  installed {name} -> {dest}")
 
     if installed:
-        print(f"\nDone. Restart Claude Code to load: {', '.join(installed)}")
+        how = "linked" if args.link else "installed"
+        print(f"\nDone ({how}). Restart Claude Code to load: {', '.join(installed)}")
+        if args.link:
+            print("Linked installs auto-update on `pip install -U mad-skills` "
+                  "(just restart Claude Code afterwards).")
     else:
         print("\nNothing installed.")
     return 0
@@ -82,8 +109,8 @@ def cmd_uninstall(args) -> int:
     target = _target_dir(args)
     for name in args.skills:
         dest = target / name
-        if dest.exists():
-            shutil.rmtree(dest)
+        if dest.exists() or dest.is_symlink():
+            _remove_dest(dest)
             print(f"  removed {dest}")
         else:
             print(f"  not installed: {name}")
@@ -109,10 +136,15 @@ def build_parser() -> argparse.ArgumentParser:
     sp = sub.add_parser("list", help="list bundled skills")
     sp.set_defaults(func=cmd_list)
 
-    sp = sub.add_parser("install", help="copy skills into a Claude skills dir")
+    sp = sub.add_parser("install", help="copy (or --link) skills into a Claude skills dir")
     sp.add_argument("skills", nargs="*", help="skill names (default: all)")
     sp.add_argument(
         "--force", action="store_true", help="overwrite existing skills"
+    )
+    sp.add_argument(
+        "--link", action="store_true",
+        help="symlink to the installed package instead of copying, so "
+             "`pip install -U` updates the skill in place",
     )
     add_target_flags(sp)
     sp.set_defaults(func=cmd_install)

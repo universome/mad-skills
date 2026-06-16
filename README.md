@@ -6,10 +6,17 @@ My personal [Claude Code](https://claude.com/claude-code) skills, pip-installabl
 
 ```bash
 uv tool install "git+https://github.com/universome/mad-skills.git"
-mad-skills install   # copies skills into ~/.claude/skills
+mad-skills install          # copies skills into ~/.claude/skills
+# or:
+mad-skills install --link   # symlink instead, so `pip install -U` auto-updates them
 ```
 
-Restart Claude Code afterwards.
+Restart Claude Code afterwards (skills load at launch).
+
+`--link` points `~/.claude/skills/<name>` at the installed package, so upgrading
+the package updates the skills in place — no `mad-skills install` re-run (just
+restart Claude Code). Use the default copy if your Python env may move or its
+version may change (which would dangle the symlink).
 
 ## Skills
 

@@ -100,13 +100,44 @@ def inbox_dir(peer_id: str) -> Path:
 # --------------------------------------------------------------------------- #
 # Atomic IO helpers
 # --------------------------------------------------------------------------- #
-def _atomic_write_json(path: Path, data: dict) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
+def ensure_bus_dir(path: Path) -> None:
+    """Create a directory under the bus, world read/write/execute.
+
+    The bus is shared by design and may be used by several UNIX *users* with
+    different uids/gids (e.g. a developer's agent and another teammate on the
+    same cluster). Default umask makes dirs owner/group-only, which locks other
+    users out — so every bus directory from the bus root down to `path` is
+    chmod'd to 0777 (best effort; only dirs we own can be changed).
+    """
+    path.mkdir(parents=True, exist_ok=True)
+    bus = bus_dir()
+    try:
+        rel = path.relative_to(bus)
+        chain = [bus] + [bus.joinpath(*rel.parts[: i + 1])
+                         for i in range(len(rel.parts))]
+    except ValueError:
+        chain = [path]
+    for d in chain:
+        try:
+            os.chmod(d, 0o777)
+        except OSError:
+            pass  # not ours to chmod; nothing we can do
+
+
+def _atomic_write_json(path: Path, data: dict, shared: bool = False) -> None:
+    if shared:
+        ensure_bus_dir(path.parent)
+    else:
+        path.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp = tempfile.mkstemp(dir=str(path.parent), suffix=".tmp")
     try:
         with os.fdopen(fd, "w") as f:
             json.dump(data, f, indent=2)
             f.write("\n")
+        if shared:
+            # mkstemp makes 0600; widen so other users can read our heartbeat
+            # / messages (and delete consumed messages via dir write perms).
+            os.chmod(tmp, 0o666)
         os.replace(tmp, path)  # atomic on POSIX
     finally:
         if os.path.exists(tmp):
@@ -173,7 +204,7 @@ def _publish_heartbeat(ident: dict) -> None:
     record = dict(ident)
     record["last_seen"] = time.time()
     record["last_seen_iso"] = time.strftime("%Y-%m-%dT%H:%M:%S")
-    _atomic_write_json(peers_dir() / f"{ident['id']}.json", record)
+    _atomic_write_json(peers_dir() / f"{ident['id']}.json", record, shared=True)
 
 
 # --------------------------------------------------------------------------- #
@@ -186,7 +217,7 @@ def cmd_register(args) -> int:
         ident["summary"] = args.summary
         _atomic_write_json(_state_path(), ident)
     _publish_heartbeat(ident)
-    inbox_dir(ident["id"]).mkdir(parents=True, exist_ok=True)
+    ensure_bus_dir(inbox_dir(ident["id"]))  # world-writable so others can msg us
     _emit(args, {"registered": ident, "bus_dir": ident["bus_dir"]})
     return 0
 
@@ -248,7 +279,7 @@ def cmd_send(args) -> int:
     }
     # nanosecond prefix keeps inbox files lexically ordered by arrival
     fname = f"{time.time_ns()}-{msg['id']}.json"
-    _atomic_write_json(inbox_dir(args.peer_id) / fname, msg)
+    _atomic_write_json(inbox_dir(args.peer_id) / fname, msg, shared=True)
     _emit(args, {"sent": {"to": args.peer_id, "id": msg["id"]}})
     return 0
 
@@ -276,7 +307,7 @@ def cmd_inbox(args) -> int:
 def cmd_watch(args) -> int:
     ident = load_or_create_identity()
     box = inbox_dir(ident["id"])
-    box.mkdir(parents=True, exist_ok=True)
+    ensure_bus_dir(box)
     sys.stderr.write(
         f"watching inbox for {ident['name']} ({ident['id']}); Ctrl-C to stop\n"
     )
