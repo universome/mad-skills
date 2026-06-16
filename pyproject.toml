@@ -29,7 +29,7 @@ fs-chat = "mad_skills.peer_comm:main"
 [tool.hatch.build.targets.wheel]
 # Skill files (SKILL.md, scripts) live inside the package dir, so hatchling
 # bundles them into the wheel as package data automatically.
-packages = ["src/mad_skills"]
+packages = ["mad_skills"]
 
 [tool.hatch.build.targets.sdist]
-include = ["src/mad_skills", "README.md", "LICENSE", "pyproject.toml"]
+include = ["mad_skills", "README.md", "LICENSE", "pyproject.toml"]
