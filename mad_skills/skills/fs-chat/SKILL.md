@@ -49,51 +49,74 @@ Example — the user says *"register on fs-chat as alice on
 
 ```bash
 fs-chat --dir /home/iskorokhodov/.mad-skills/fs-chat/kube-chat register --name alice
-fs-chat watch          # no flags needed — reuses the dir from register
+fs-chat watch          # run this IN THE BACKGROUND (reuses the dir from register)
 ```
 
 (That path is exactly `~/.mad-skills/fs-chat/kube-chat`, so `--group kube-chat`
 at register time is equivalent and shorter.)
 
+## ALWAYS run `watch` in the background after registering
+
+There is no daemon. A peer's liveness timestamp is refreshed **only when it runs
+an `fs-chat` command**, and peers older than 120s drop off everyone's `peers`
+list. So a session that registers and then does other work goes "offline" within
+2 minutes and never sees incoming messages. **The chat is meaningless without a
+running watcher.**
+
+Therefore, whenever you join fs-chat (anything beyond a single one-shot `send`),
+**immediately start `fs-chat watch` as a background process** (Bash tool with
+`run_in_background: true`) right after `register`. The watcher (a) refreshes the
+heartbeat every interval so you stay listed, and (b) streams incoming messages to
+its stdout — read that output to receive replies. Keep it running for the whole
+conversation; only stop it when the user is done chatting.
+
+```bash
+fs-chat register --name alice --summary "what I'm doing"   # set dir/group here
+fs-chat watch --interval 1                                  # <-- background this
+```
+
 ## Workflow
 
 1. **Register** this session once, with the dir/group + name. This saves them
-   for the working directory (re-run periodically to refresh liveness;
-   heartbeats go stale after 120s):
+   for the working directory:
 
    ```bash
    fs-chat --group <g> register --name "alice" --summary "what I'm doing"
    ```
 
-2. **Discover peers** — get their ids before messaging (no flags from here on):
+2. **Start the watcher in the background** (do this every time, right after
+   register — see the section above). It keeps you live AND delivers messages:
+
+   ```bash
+   fs-chat watch --interval 1     # Bash tool, run_in_background: true
+   ```
+
+3. **Discover peers** — get their ids before messaging (no flags from here on):
 
    ```bash
    fs-chat --json peers
    ```
 
-3. **Send** to a peer by id (`-` as the body reads stdin for long/multiline):
+4. **Send** to a peer by id (`-` as the body reads stdin for long/multiline):
 
    ```bash
    fs-chat send <peer_id> "can you take the frontend tests?"
    ```
 
-4. **Receive** — read and consume your inbox:
+5. **Receive** — replies stream to the background watcher's stdout; read that.
+   (Only use `inbox` directly for a one-off check when not watching — it
+   **consumes** messages, and would compete with the watcher if both run.)
 
    ```bash
-   fs-chat --json inbox     # returns messages, then deletes them
-   fs-chat inbox --peek     # read without consuming
-   ```
-
-5. **Stay current** — for a live conversation, run a background watcher (launch
-   it with the Bash tool in the background) so new messages stream in without
-   manual polling:
-
-   ```bash
-   fs-chat watch --interval 1
+   fs-chat --json inbox     # one-shot: returns messages, then deletes them
    ```
 
 ## Guidance for Claude
 
+- **Background `watch` is the default.** For any real conversation, start it
+  right after `register` and keep it running; the chat does not work without it.
+- Don't run `inbox` while a `watch` is running for the same peer — they both
+  consume messages and will race. Read replies from the watcher's output.
 - Pass `--group`/`--dir` and `--name` **only on `register`**; later commands
   reuse them automatically. Only re-pass a flag to switch group mid-session.
 - Put `--group`/`--dir`/`--json` before the subcommand: `fs-chat --json peers`.
@@ -104,9 +127,8 @@ at register time is equivalent and shorter.)
 - `inbox` **consumes** messages (deletes after reading). Use `--peek` to look
   without consuming. Don't call `inbox` repeatedly expecting the same messages.
 - To message a peer you need its `peer_id` from `peers`, not its display name.
-- The loop for "talk to the other session": `register` → `peers` (find target
-  id) → `send` → `watch` (or `inbox`) for replies. Prefer a background `watch`
-  over polling `inbox` for an extended back-and-forth.
+- The loop for "talk to the other session": `register` → start background
+  `watch` → `peers` (find target id) → `send` → read replies from the watcher.
 
 ## Full command reference
 
