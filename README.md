@@ -39,4 +39,15 @@ version may change (which would dangle the symlink).
   `MAD_SKILLS_FS_CHAT_DIR`; pick a group with `--group NAME` or
   `MAD_SKILLS_FS_CHAT_GROUP`.
 
+- **`session-costs`** — token & dollar-cost accounting across your past Claude
+  Code sessions. Parses the JSONL transcripts under `~/.claude/projects/`, sums
+  tokens per session/project/model, and prices them (prices are editable via
+  `--prices`).
+
+  ```bash
+  session-costs                 # per-session table + grand total
+  session-costs --by model      # or --by project
+  session-costs --json          # machine-readable
+  ```
+
 MIT licensed.

@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "mad-skills"
-version = "0.1.5"
+version = "0.1.6"
 description = "Installable Claude Code skills, including fs-chat: filesystem-based chat between Claude Code sessions."
 readme = "README.md"
 requires-python = ">=3.9"
@@ -25,6 +25,7 @@ Homepage = "https://github.com/universome/mad-skills"
 [project.scripts]
 mad-skills = "mad_skills.cli:main"
 fs-chat = "mad_skills.peer_comm:main"
+session-costs = "mad_skills.session_costs:main"
 
 [tool.hatch.build.targets.wheel]
 # Skill files (SKILL.md, scripts) live inside the package dir, so hatchling
